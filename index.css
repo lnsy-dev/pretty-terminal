@@ -1,0 +1,101 @@
+/**
+ * Global Styles
+ *
+ * The terminal app uses the dataroom theme for colors, typography, and
+ * light/dark mode. The terminal component handles the rest of the UI.
+ */
+
+@import './styles/dataroom-theme.css';
+@import './styles/variables.css';
+@import './styles/terminal-component.css';
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 100vw;
+  height: 100vh;
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-ui), sans-serif;
+  padding-top: var(--title-bar-height);
+  box-sizing: border-box;
+}
+
+/*
+  Draggable Title Bar
+
+  The native title bar is hidden on macOS so the app content extends up to
+  the window chrome. This element creates a draggable region across the top
+  of the window so users can still move the app by dragging it.
+*/
+.title-bar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--title-bar-height);
+  display: flex;
+  align-items: center;
+  /* Leave room for the macOS traffic-light window controls on the left. */
+  padding-left: 5rem;
+  padding-right: 0.5rem;
+  box-sizing: border-box;
+  -webkit-app-region: drag;
+  z-index: 1000;
+}
+
+/* The terminal component is inset from the window edges on all sides so
+   the last line is never clipped and the window has a uniform padded
+   appearance. With a single tab it is a narrow 80ch column centered on the
+   page; with multiple tabs it expands to fill the width and aligns left. */
+terminal-component {
+  position: fixed;
+  display: flex;
+  flex-direction: column;
+  top: 50%;
+  left: 1em;
+  translate: 0 -50%;
+  height: calc(100vh - 2em);
+  width: calc(100vw - 2em);
+  padding-top: var(--title-bar-height);
+  box-sizing: border-box;
+}
+
+terminal-component.single-tab {
+  /* Use the terminal monospace font so the 120ch max-width is based on the
+     actual cell width rather than the UI sans-serif font. */
+  font-family: var(--font-mono);
+  width: calc(100vw - 2em);
+  max-width: 120ch;
+  left: 50%;
+  translate: -50% -50%;
+}
+
+/* Tabs live inside the terminal component; individual panes fill the
+   terminal area rather than the whole window. */
+.terminal-area > .terminal-container {
+  top: 0;
+  height: 100%;
+  width: 100%;
+}
+
+.xterm .xterm-viewport {
+    background-color: var(--background) !important;
+}
+
+.terminal-pane.active {
+  outline: none;
+}
+
+.terminal-pane {
+  border-right: none;
+}

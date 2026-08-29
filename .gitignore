@@ -1,0 +1,87 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.pnpm-debug.log*
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# Editor directories and files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.classpath
+
+# Coverage / instrumentation
+coverage
+*.lcov
+.nyc_output
+
+# Dependency directories
+node_modules/
+
+# Optional npm cache directory
+.npm
+
+# Output of 'npm pack'
+*.tgz
+
+# dotenv environment variable files
+.env
+.env.*
+!.env.example
+
+# Build output
+dist/
+
+# Bundler caches
+.cache/
+.parcel-cache/
+.swc/
+
+# Electron packaging output
+release/
+
+# WebdriverIO test artifacts
+wdio-*/
+
+# Local chromedriver binaries used for test runs
+.chromedriver/
+
+# Vitest / test caches
+*.vitest-temp.*
+
+# Temporary folders
+tmp/
+temp/
+
+# Local-only files
+*.local
+
+# WebAssembly intermediate build artifacts (keep pre-built ones)
+*.o
+*.a
+src/wasm/rust/**/target/
+
+# Project-specific
+prompts/

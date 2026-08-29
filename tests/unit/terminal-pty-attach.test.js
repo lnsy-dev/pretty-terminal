@@ -81,19 +81,14 @@ vi.mock('@xterm/addon-fit', () => ({
     constructor() {
       this.name = 'FitAddon';
       this.terminal = null;
-      this.fitCount = 0;
+      this.measureCount = 0;
     }
     activate(terminal) {
       this.terminal = terminal;
     }
-    fit() {
-      if (!this.terminal) {
-        return;
-      }
-      this.fitCount += 1;
-      const size = fitAddonSequence[this.fitCount - 1] || { cols: 100, rows: 30 };
-      this.terminal.cols = size.cols;
-      this.terminal.rows = size.rows;
+    proposeDimensions() {
+      this.measureCount += 1;
+      return fitAddonSequence[this.measureCount - 1] || { cols: 100, rows: 30 };
     }
   },
 }));
@@ -198,9 +193,10 @@ describe('TerminalComponent PTY attachment', () => {
 
     const createCall = window.terminalPty.createTerminal.mock.calls[0];
     expect(createCall).toBeDefined();
-    // fitAddon.fit() sets 100x30, fitTerminal subtracts the 2-row buffer.
+    // proposeDimensions() yields 100x30; the exact fitted size is forwarded
+    // with no rows subtracted.
     expect(createCall[2]).toBe(100);
-    expect(createCall[3]).toBe(28);
+    expect(createCall[3]).toBe(30);
 
     vi.useRealTimers();
   });
@@ -230,7 +226,10 @@ describe('TerminalComponent PTY attachment', () => {
     const createCall = window.terminalPty.createTerminal.mock.calls[0];
     expect(createCall).toBeDefined();
     expect(createCall[2]).toBe(100);
-    expect(createCall[3]).toBe(28);
+    expect(createCall[3]).toBe(30);
+
+    // The PTY is spawned exactly once.
+    expect(window.terminalPty.createTerminal).toHaveBeenCalledTimes(1);
 
     vi.useRealTimers();
   });

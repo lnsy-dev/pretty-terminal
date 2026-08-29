@@ -55,8 +55,8 @@ body {
 
 /* The terminal component is inset from the window edges on all sides so
    the last line is never clipped and the window has a uniform padded
-   appearance. With a single tab it is a narrow 80ch column centered on the
-   page; with multiple tabs it expands to fill the width and aligns left. */
+   appearance. The component always fills the available width; individual
+   xterm.js panes are capped at 120ch so text lines stay readable. */
 terminal-component {
   position: fixed;
   display: flex;
@@ -68,16 +68,6 @@ terminal-component {
   width: calc(100vw - 2em);
   padding-top: var(--title-bar-height);
   box-sizing: border-box;
-}
-
-terminal-component.single-tab {
-  /* Use the terminal monospace font so the 120ch max-width is based on the
-     actual cell width rather than the UI sans-serif font. */
-  font-family: var(--font-mono);
-  width: calc(100vw - 2em);
-  max-width: 120ch;
-  left: 50%;
-  translate: -50% -50%;
 }
 
 /* Tabs live inside the terminal component; individual panes fill the

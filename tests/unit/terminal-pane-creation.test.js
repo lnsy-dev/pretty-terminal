@@ -53,7 +53,7 @@ vi.mock('@xterm/xterm', () => ({
     }
 
     open(container) {
-      callLog.push({ method: 'open', container });
+      callLog.push({ method: 'open', container, flexAtOpen: container.style.flex });
     }
 
     onData() {}
@@ -78,6 +78,9 @@ vi.mock('@xterm/addon-fit', () => ({
     }
     activate(terminal) {
       this.terminal = terminal;
+    }
+    proposeDimensions() {
+      return { cols: 100, rows: 30 };
     }
     fit() {
       if (this.terminal) {
@@ -211,7 +214,7 @@ describe('TerminalComponent pane creation', () => {
     expect(resizeIndex).toBeGreaterThan(openIndex);
   });
 
-  it('reflows a pane before its PTY is created so the grid stays current', async () => {
+  it('assigns the pane its final flex share before the terminal is opened', async () => {
     const component = Object.create(TerminalComponent.prototype);
     component.tabs = [];
     component.nextPaneId = 1;
@@ -220,19 +223,42 @@ describe('TerminalComponent pane creation', () => {
 
     const tab = { id: 1, container: component.terminalArea, panes: [] };
     await component.openPane(tab);
+    await component.openPane(tab, { insertAfterPaneId: tab.panes[0].id });
 
-    // Simulate a pane whose PTY has been attached but not yet created.
-    const [pane] = tab.panes;
-    pane.pty = { resize: vi.fn() };
-    pane.ptyCreated = false;
+    // The container passed to xterm.js open() must already carry the equal
+    // flex share, so the terminal's first measurement happens at its real
+    // (half) width instead of the CSS default full width.
+    const openCalls = callLog.filter((c) => c.method === 'open');
+    expect(openCalls).toHaveLength(2);
+    expect(openCalls[0].flexAtOpen).toBe('1 1 100%');
+    expect(openCalls[1].flexAtOpen).toBe('1 1 50%');
+
+    // The first pane's share is halved by the split as well.
+    expect(tab.panes[0].element.style.flex).toBe('1 1 50%');
+  });
+
+  it('reflowPanes assigns equal flex shares without resizing terminals', async () => {
+    const component = Object.create(TerminalComponent.prototype);
+    component.tabs = [];
+    component.nextPaneId = 1;
+    component.activeTabId = null;
+    component.terminalArea = globalThis.document.createElement('div');
+
+    const tab = { id: 1, container: component.terminalArea, panes: [] };
+    await component.openPane(tab);
+    await component.openPane(tab, { insertAfterPaneId: tab.panes[0].id });
 
     callLog.length = 0;
+    tab.panes.forEach((pane) => {
+      pane.element.style.flex = '1 1 100%';
+    });
+
     component.reflowPanes(tab);
 
-    // The terminal should still be resized even though the PTY does not exist
-    // yet, so the rendered grid does not drift from the container.
+    expect(tab.panes[0].element.style.flex).toBe('1 1 50%');
+    expect(tab.panes[1].element.style.flex).toBe('1 1 50%');
+    // Resizing is the observer/fitPane path's job, not reflow's.
     const resizeCall = callLog.find((c) => c.method === 'resize');
-    expect(resizeCall).toBeDefined();
-    expect(pane.pty.resize).not.toHaveBeenCalled();
+    expect(resizeCall).toBeUndefined();
   });
 });

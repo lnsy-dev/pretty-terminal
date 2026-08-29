@@ -165,6 +165,8 @@ terminal-component,
 
 .terminal-pane {
   position: relative;
+  display: flex;
+  justify-content: center;
   flex: 1 1 100%;
   min-width: 0;
   height: 100%;
@@ -182,8 +184,18 @@ terminal-component,
   outline-offset: -1px;
 }
 
-/* Ensure xterm fills the container it is mounted in. */
+/* Ensure xterm fills the wrapper it is mounted in. */
 .terminal-pane .xterm {
+  height: 100%;
+  width: 100%;
+}
+
+/* Per-instance width cap: each xterm grid is limited to 120ch, while the
+   outer .terminal-pane (and the component) can still fill the window on a
+   split. */
+.terminal-pane .xterm-wrapper {
+  width: 100%;
+  max-width: 120ch;
   height: 100%;
 }
 

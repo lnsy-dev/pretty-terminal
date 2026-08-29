@@ -16,6 +16,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { LigaturesAddon } from '@xterm/addon-ligatures';
 import TerminalShell from './lib/terminal-shell.js';
+import { computeFlexShares, fitPane } from './lib/terminal-sizing.js';
 
 /**
  * Read a CSS custom property from an element's computed style.
@@ -88,42 +89,6 @@ function debounce(fn, ms) {
       fn(...args);
     }, ms);
   };
-}
-
-/**
- * Resize the terminal to fill its container and forward the new
- * dimensions to a PTY if one is attached.
- *
- * FitAddon can occasionally round up so the rendered grid is one pixel
- * taller than the container, clipping the bottom row. Reserve a two-row
- * buffer at the bottom so the last line of text is always fully visible.
- *
- * @param {Terminal} terminal - xterm.js Terminal instance.
- * @param {FitAddon} fitAddon - xterm.js fit addon.
- * @param {Object} [pty] - Electron PTY bridge.
- * @param {{cols: number, rows: number}} [lastSize] - Last size sent to the PTY.
- * @returns {{cols: number, rows: number}}
- */
-function fitTerminal(terminal, fitAddon, pty, lastSize = null) {
-  fitAddon.fit();
-
-  // FitAddon's math can round so the rendered grid is slightly taller than
-  // the container, clipping the bottom row. Reserve two blank rows at the
-  // bottom so the last line of text is always fully visible.
-  const rowBuffer = 2;
-  if (terminal.rows > rowBuffer) {
-    terminal.resize(terminal.cols, terminal.rows - rowBuffer);
-  }
-
-  const size = { cols: terminal.cols, rows: terminal.rows };
-  const changed = !lastSize || lastSize.cols !== size.cols || lastSize.rows !== size.rows;
-  if (pty && changed) {
-    pty.resize(size.cols, size.rows);
-  }
-
-  terminal.scrollToBottom();
-
-  return size;
 }
 
 /**
@@ -203,20 +168,13 @@ class TerminalComponent extends DataroomElement {
     document.addEventListener('keydown', (e) => this.handleKeyDown(e));
     document.addEventListener('click', (e) => this.hideContextMenu());
 
-    // Watch the terminal area itself so any change to its size — browser
-    // window resize, fullscreen toggle, or container reflow — is forwarded to
-    // the active PTY after the browser has finished layout.
-    if (typeof ResizeObserver !== 'undefined') {
-      this.terminalAreaResizeObserver = new ResizeObserver(debounce(() => {
-        this.fitActiveTab();
-      }, 100));
-      this.terminalAreaResizeObserver.observe(this.terminalArea);
-    }
-
+    // Pane size changes are observed per pane (see openPane), which covers
+    // every container-level geometry change: window resizes, fullscreen
+    // toggles, and the .single-tab width-cap transition all change the size
+    // of every pane in the active tab.
     if (this.titleBar && window.electronFullscreen) {
       window.electronFullscreen.onChange((isFullscreen) => {
         this.titleBar.classList.toggle('fullscreen', isFullscreen);
-        requestAnimationFrame(() => this.fitActiveTab());
       });
     }
 
@@ -352,23 +310,26 @@ class TerminalComponent extends DataroomElement {
 
     pane.terminal.onData((data) => pty.write(pane.id, data));
 
-    // Size the terminal to its container before spawning the PTY. Starting the
-    // shell with the real dimensions avoids the default 80x24 -> actual-size
-    // resize race that makes zsh's PROMPT_SP print a leading "%" on wrapped or
-    // partial prompt lines (especially visible in narrow split panes).
-    //
-    // Wait two animation frames so the pane container has had time to be laid
-    // out by the browser. Flex distribution, title-bar insertion, and the
-    // initial xterm.js render can each take a frame, so one rAF is sometimes
-    // not enough for FitAddon to measure real pixel dimensions instead of
-    // defaulting to 80x24.
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        pane.lastPtySize = fitTerminal(pane.terminal, pane.fitAddon, null);
-        pty.createTerminal(pane.id, undefined, pane.lastPtySize.cols, pane.lastPtySize.rows);
+    // Spawn the PTY only once the pane has measurable dimensions so the
+    // shell starts at its final size. Starting at xterm.js's default 80x24
+    // and resizing afterwards makes zsh's PROMPT_SP print a leading "%" on
+    // wrapped prompt lines and forces fullscreen apps (vim, micro) through a
+    // spurious redraw. Normally the pane is already laid out (openPane fits
+    // it synchronously) and the first attempt succeeds; the retry loop only
+    // covers the rare not-yet-laid-out case.
+    const maxAttempts = 10;
+    const spawn = (attemptsLeft) => {
+      const size = fitPane(pane);
+      if (size) {
+        pty.createTerminal(pane.id, undefined, size.cols, size.rows);
         pane.ptyCreated = true;
-      });
-    });
+        return;
+      }
+      if (attemptsLeft > 0) {
+        requestAnimationFrame(() => spawn(attemptsLeft - 1));
+      }
+    };
+    spawn(maxAttempts);
   }
 
   /**
@@ -583,6 +544,27 @@ class TerminalComponent extends DataroomElement {
       this.tabs.push(tab);
     }
 
+    // Apply the layout class (single-tab width cap) BEFORE the first fit:
+    // the class changes the component's width (120ch cap), and fitting before
+    // it is applied sizes the terminal (and the PTY spawn) to the uncapped
+    // window width, forcing a second, spurious resize right after open.
+    this._updateLayoutClass();
+
+    // Explicitly load the terminal font before any cell measurement.
+    // @font-face fonts load lazily on first use, so fonts.ready alone can
+    // resolve before the terminal font has even been requested — xterm.js
+    // would then measure cells with fallback-font metrics and cache them,
+    // leaving the grid mis-sized (by several columns) once the real font
+    // swaps in.
+    if (typeof document !== 'undefined' && document.fonts && document.fonts.load) {
+      const family = getCssVar(this.terminalArea, '--font-mono', 'monospace').split(',')[0].trim();
+      try {
+        await document.fonts.load(`14px ${family}`);
+      } catch {
+        // Fall through with whatever metrics are available.
+      }
+    }
+
     // Wait for the monospace web font to load before measuring cells.
     await document.fonts.ready;
 
@@ -591,8 +573,6 @@ class TerminalComponent extends DataroomElement {
     this.setActiveTab(tabId);
 
     await this.openPane(tab);
-
-    this._updateLayoutClass();
 
     return tabId;
   }
@@ -611,6 +591,23 @@ class TerminalComponent extends DataroomElement {
     this.nextPaneId += 1;
 
     const paneContainer = this.create('div', { class: 'terminal-pane', 'data-pane-id': String(paneId) }, tab.container);
+
+    // Inner wrapper that carries the per-instance width cap. xterm.js's
+    // FitAddon measures this wrapper's width, so the grid is limited to 120ch
+    // per pane while the outer .terminal-pane (and the component) can still
+    // fill the window on a split.
+    const xtermWrapper = this.create('div', { class: 'xterm-wrapper' }, paneContainer);
+
+    // Give every pane its equal flex share BEFORE opening xterm.js so the
+    // terminal's first measurement happens at its real width. Fitting at the
+    // CSS default (full width) and then again after the split reflow produced
+    // a spurious full-width -> half-width resize: two SIGWINCHs, two redraws
+    // in fullscreen apps, and zsh PROMPT_SP "%" markers on wrapped prompts.
+    const share = computeFlexShares(tab.panes.length + 1);
+    paneContainer.style.flex = share;
+    tab.panes.forEach((existing) => {
+      existing.element.style.flex = share;
+    });
 
     const style = getComputedStyle(paneContainer);
 
@@ -631,13 +628,7 @@ class TerminalComponent extends DataroomElement {
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
 
-    terminal.open(paneContainer);
-
-    // Size the terminal to the container immediately so the initial shell
-    // output (and the PTY when it is created) uses the real grid instead of
-    // xterm.js's default 80x24. This avoids zsh PROMPT_SP emitting a leading
-    // "%" when the prompt is printed at one size and then resized.
-    fitTerminal(terminal, fitAddon, null);
+    terminal.open(xtermWrapper);
 
     // LigaturesAddon must be loaded after the terminal is opened; it needs
     // access to the renderer and will throw if activated too early.
@@ -652,6 +643,8 @@ class TerminalComponent extends DataroomElement {
       fitAddon,
       shell: null,
       pty: null,
+      ptyCreated: false,
+      userScrolled: false,
       lastPtySize: null,
     };
 
@@ -666,27 +659,27 @@ class TerminalComponent extends DataroomElement {
       this.setActivePane(tab, paneId);
     });
 
+    // Size the terminal to the container immediately so the initial shell
+    // output (and the PTY when it is created) uses the real grid instead of
+    // xterm.js's default 80x24. The container is visible here and already has
+    // its final flex share, so this single fit produces the settled size.
+    fitPane(pane);
+
     if (window.terminalPty) {
-      this._attachPty(pane);
       pane.pty = window.terminalPty;
+      this._attachPty(pane);
     } else {
       pane.shell = attachLocalShell(terminal, fitAddon);
     }
 
-    // Watch for container size changes (window resize, tab switches, pane
-    // splits, font loads) and push the new grid size to the PTY.
+    // Watch for container size changes (window resize, splits, tab switches,
+    // fullscreen, font loads) and push the new grid size to the PTY.
     if (typeof ResizeObserver !== 'undefined') {
       pane.resizeObserver = new ResizeObserver(debounce(() => {
         if (tab.id !== this.activeTabId) {
           return;
         }
-        if (pane.ptyCreated) {
-          pane.lastPtySize = fitTerminal(pane.terminal, pane.fitAddon, pane.pty, pane.lastPtySize);
-        } else if (pane.pty) {
-          // The PTY is attached but not spawned yet; keep the terminal grid in
-          // sync so the dimensions used at spawn time are current.
-          pane.lastPtySize = fitTerminal(pane.terminal, pane.fitAddon, null, pane.lastPtySize);
-        }
+        fitPane(pane);
       }, 100));
       pane.resizeObserver.observe(paneContainer);
     }
@@ -698,8 +691,6 @@ class TerminalComponent extends DataroomElement {
       this.shell = pane.shell;
       this.container = pane.element;
     }
-
-    this.reflowPanes(tab);
 
     return paneId;
   }
@@ -866,7 +857,12 @@ class TerminalComponent extends DataroomElement {
   }
 
   /**
-   * Resize and reflow all panes in a tab so they share the available width.
+   * Distribute the available width equally among a tab's panes.
+   *
+   * This only assigns flex shares; the actual terminal/PTY resizing happens
+   * through each pane's ResizeObserver (and explicit fitPane passes where
+   * synchronous correctness matters), so every resize flows through a single
+   * guarded, deduplicated path.
    *
    * @private
    * @param {Object} tab - Tab object.
@@ -878,21 +874,9 @@ class TerminalComponent extends DataroomElement {
       return;
     }
 
+    const share = computeFlexShares(count);
     tab.panes.forEach((pane) => {
-      pane.element.style.flex = `1 1 ${100 / count}%`;
-    });
-
-    tab.panes.forEach((pane) => {
-      // Do not forward dimensions to a PTY that has not been spawned yet, but
-      // still resize the xterm.js terminal so it matches the container. This
-      // keeps the rendered grid correct while the pane is being split or a tab
-      // is being switched to, preventing a later resize from wrapping the
-      // already-printed prompt and triggering zsh's PROMPT_SP "%" marker.
-      if (pane.pty && !pane.ptyCreated) {
-        pane.lastPtySize = fitTerminal(pane.terminal, pane.fitAddon, null, pane.lastPtySize);
-        return;
-      }
-      pane.lastPtySize = fitTerminal(pane.terminal, pane.fitAddon, pane.pty, pane.lastPtySize);
+      pane.element.style.flex = share;
     });
   }
 
@@ -938,7 +922,13 @@ class TerminalComponent extends DataroomElement {
     tab.container.classList.add('active');
     tab.container.style.display = 'flex';
 
-    this.reflowPanes(tab);
+    // Fit explicitly: the container was hidden (display:none) until now, and
+    // waiting for the debounced pane observers would leave a stale grid on
+    // screen. Hidden containers cannot be measured, so fitPane is a safe
+    // no-op for any pane that is still not laid out.
+    for (const pane of tab.panes) {
+      fitPane(pane);
+    }
 
     // Expose the active terminal/shell/container for existing tests and callers.
     const activePane = this.getActivePane();
@@ -954,7 +944,7 @@ class TerminalComponent extends DataroomElement {
   }
 
   /**
-   * Resize the active terminal to fill the available space.
+   * Resize every pane of the active tab to fill the available space.
    *
    * @returns {void}
    */
@@ -964,7 +954,9 @@ class TerminalComponent extends DataroomElement {
       return;
     }
 
-    this.reflowPanes(tab);
+    for (const pane of tab.panes) {
+      fitPane(pane);
+    }
   }
 
   /**
@@ -1082,5 +1074,5 @@ if (!customElements.get('terminal-component')) {
   customElements.define('terminal-component', TerminalComponent);
 }
 
-export { TerminalComponent, fitTerminal };
+export { TerminalComponent };
 export default TerminalComponent;

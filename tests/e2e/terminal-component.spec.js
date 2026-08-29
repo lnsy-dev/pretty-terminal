@@ -309,7 +309,7 @@ describe('terminal layout', () => {
     expect(layout.componentWidth).toBeLessThanOrEqual(layout.viewportWidth);
   });
 
-  it('caps the width at 120ch on a wide viewport', async () => {
+  it('caps each xterm.js instance at 120ch on a wide viewport', async () => {
     await browser.setWindowSize(1600, 900);
     await browser.url('/');
 
@@ -323,18 +323,24 @@ describe('terminal layout', () => {
 
     const layout = await browser.execute(() => {
       const component = document.querySelector('terminal-component');
-      const style = getComputedStyle(component);
-      const rect = component.getBoundingClientRect();
+      const wrapper = document.querySelector('.xterm-wrapper');
+      const componentRect = component.getBoundingClientRect();
+      const wrapperRect = wrapper.getBoundingClientRect();
+      const chPx = wrapperRect.width / component.terminal.cols;
       return {
-        componentWidth: rect.width,
+        componentWidth: componentRect.width,
         viewportWidth: window.innerWidth,
-        maxWidthPx: parseFloat(style.maxWidth),
+        wrapperWidth: wrapperRect.width,
+        cols: component.terminal.cols,
+        chPx,
       };
     });
 
-    // A fixed-width terminal would fill the viewport; the cap keeps it narrower.
-    expect(layout.componentWidth).toBeLessThan(layout.viewportWidth - 300);
-    expect(layout.componentWidth).toBeLessThanOrEqual(layout.maxWidthPx + 1);
+    // The component itself fills the viewport, but each xterm grid stays
+    // within roughly 120 character cells.
+    expect(layout.componentWidth).toBeGreaterThan(layout.viewportWidth - 300);
+    expect(layout.wrapperWidth).toBeLessThanOrEqual(120 * layout.chPx + 2);
+    expect(layout.cols).toBeLessThanOrEqual(121);
   });
 
   it('resizes the terminal grid when the window is resized', async () => {

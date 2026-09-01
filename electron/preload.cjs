@@ -21,8 +21,39 @@ contextBridge.exposeInMainWorld('terminalPty', {
    *   login shell on macOS/Linux or PowerShell on Windows.
    * @param {number} [cols] - Initial terminal width in columns.
    * @param {number} [rows] - Initial terminal height in rows.
+   * @param {string} [cwd] - Working directory for the new shell. Falls back
+   *   to the user's home directory when omitted or no longer valid.
    */
-  createTerminal: (tabId, shell, cols, rows) => ipcRenderer.send('terminal-create', { tabId, shell, cols, rows }),
+  createTerminal: (tabId, shell, cols, rows, cwd) => ipcRenderer.send('terminal-create', { tabId, shell, cols, rows, cwd }),
+
+  /**
+   * Ask for the working directory of a pane's shell process.
+   *
+   * Used so a newly opened tab can start its shell in the same directory
+   * the user is currently in. Resolves to null when the pane has no live
+   * PTY or the directory cannot be determined.
+   *
+   * @param {string|number} tabId - Identifier for the tab's PTY session.
+   * @returns {Promise<string|null>} The shell's cwd, or null.
+   */
+  getCwd: (tabId) => ipcRenderer.invoke('terminal-get-cwd', { tabId }),
+
+  /**
+   * Ask whether a pane's shell has user-launched child processes running
+   * (vim, a build, ...). Used to confirm before closing a pane.
+   *
+   * @param {string|number} tabId - Identifier for the pane's PTY session.
+   * @returns {Promise<boolean>} True when processes are still running.
+   */
+  hasProcesses: (tabId) => ipcRenderer.invoke('terminal-has-processes', { tabId }),
+
+  /**
+   * Show or clear the silent-bell badge on the app (Dock) icon.
+   *
+   * @param {boolean} active - True when at least one tab has an unread bell.
+   * @returns {void}
+   */
+  setBellBadge: (active) => ipcRenderer.send('terminal-bell-badge', Boolean(active)),
 
   /**
    * Send keystrokes / input to the shell for a specific tab.

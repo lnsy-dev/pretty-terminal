@@ -65,6 +65,7 @@ vi.mock('@xterm/xterm', () => ({
 
     onData() {}
     onScroll() {}
+    onBell() {}
     scrollToBottom() {}
     focus() {}
     writeln() {}
@@ -221,7 +222,7 @@ describe('TerminalComponent split/resize lifecycle', () => {
     const { tab } = await setupSinglePane();
 
     expect(window.terminalPty.createTerminal).toHaveBeenCalledTimes(1);
-    expect(window.terminalPty.createTerminal).toHaveBeenCalledWith(tab.panes[0].id, undefined, 100, 30);
+    expect(window.terminalPty.createTerminal).toHaveBeenCalledWith(tab.panes[0].id, undefined, 100, 30, null);
     expect(tab.panes[0].ptyCreated).toBe(true);
   });
 
@@ -267,7 +268,7 @@ describe('TerminalComponent split/resize lifecycle', () => {
     await fireObserver(0);
     await fireObserver(1);
 
-    component.closePane(tab.panes[1].id);
+    await component.closePane(tab.panes[1].id);
 
     expect(tab.panes).toHaveLength(1);
     expect(tab.panes[0].element.style.flex).toBe('1 1 100%');

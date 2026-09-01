@@ -217,4 +217,31 @@ describe('terminal tabs', () => {
     const activeTabId = await browser.execute(() => document.querySelector('terminal-component').activeTabId);
     expect(activeTabId).toBe(ids.fourthId);
   });
+
+  it('opens a new tab with the pressed number when that tab does not exist', async () => {
+    await browser.execute(async () => {
+      const component = document.querySelector('terminal-component');
+      await component.openTab();
+    });
+
+    await browser.execute(() => {
+      const component = document.querySelector('terminal-component');
+      component.handleKeyDown(new KeyboardEvent('keydown', { key: '5', metaKey: true }));
+    });
+
+    await browser.waitUntil(async () => {
+      const state = await browser.execute(() => {
+        const component = document.querySelector('terminal-component');
+        return { activeTabId: component.activeTabId, tabCount: component.tabs.length };
+      });
+      return state.tabCount === 3 && state.activeTabId === 5;
+    }, { timeout: 5000 });
+
+    const labels = await browser.execute(() => {
+      const component = document.querySelector('terminal-component');
+      return component.tabs.map((t) => t.labelElement.textContent);
+    });
+
+    expect(labels).toEqual(['1', '2', '5']);
+  });
 });

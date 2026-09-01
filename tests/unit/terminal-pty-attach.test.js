@@ -7,7 +7,7 @@
  * prompt is printed before the resize arrives.
  */
 
-import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 
 const callLog = [];
 
@@ -64,6 +64,7 @@ vi.mock('@xterm/xterm', () => ({
 
     onData() {}
     onScroll() {}
+    onBell() {}
     scrollToBottom() {}
     focus() {}
     writeln() {}
@@ -232,5 +233,140 @@ describe('TerminalComponent PTY attachment', () => {
     expect(window.terminalPty.createTerminal).toHaveBeenCalledTimes(1);
 
     vi.useRealTimers();
+  });
+
+  describe('close-pane process confirmation', () => {
+    let originalBridge;
+
+    beforeEach(() => {
+      originalBridge = window.terminalPty;
+    });
+
+    afterEach(() => {
+      window.terminalPty = originalBridge;
+      delete window.confirm;
+    });
+
+    /**
+     * Build a minimal fake pane as _teardownPane would see it.
+     *
+     * @param {number} id - Pane id.
+     * @param {object} tab - Owning tab.
+     * @returns {object} The fake pane.
+     */
+    function makeFakePane(id, tab) {
+      return {
+        id,
+        tabId: tab.id,
+        element: { remove: vi.fn(), classList: { add: vi.fn(), remove: vi.fn() }, style: {} },
+        terminal: { dispose: vi.fn(), focus: vi.fn() },
+        shell: null,
+        pty: window.terminalPty,
+        ptyCreated: true,
+        cwd: null,
+      };
+    }
+
+    /**
+     * Build a component with two tabs, each holding one pane.
+     *
+     * @returns {{ component: object, tab1: object, tab2: object, p1: object, p2: object }}
+     */
+    function makeComponent() {
+      const component = Object.create(TerminalComponent.prototype);
+      component.tabs = [];
+      component.nextPaneId = 100;
+      component.activeTabId = 2;
+      component.terminalArea = globalThis.document.createElement('div');
+      component._updateLayoutClass = () => {};
+
+      const tab1 = { id: 1, element: { remove: vi.fn() }, container: { remove: vi.fn() }, panes: [], activePaneId: null };
+      const tab2 = { id: 2, element: { remove: vi.fn() }, container: { remove: vi.fn() }, panes: [], activePaneId: null };
+      const p1 = makeFakePane(11, tab1);
+      const p2 = makeFakePane(12, tab2);
+      tab1.panes.push(p1);
+      tab1.activePaneId = 11;
+      tab2.panes.push(p2);
+      tab2.activePaneId = 12;
+      component.tabs.push(tab1, tab2);
+
+      return { component, tab1, tab2, p1, p2 };
+    }
+
+    function makeBridge(overrides = {}) {
+      return {
+        createTerminal: vi.fn(),
+        onData: vi.fn(),
+        onExit: vi.fn(),
+        kill: vi.fn(),
+        hasProcesses: vi.fn(async () => false),
+        ...overrides,
+      };
+    }
+
+    it('closes without prompting when no processes are running', async () => {
+      window.terminalPty = makeBridge();
+      window.confirm = vi.fn();
+      const { component, tab1, p1 } = makeComponent();
+
+      await component.closePane(p1.id);
+
+      expect(window.terminalPty.hasProcesses).toHaveBeenCalledWith(11);
+      expect(window.confirm).not.toHaveBeenCalled();
+      expect(window.terminalPty.kill).toHaveBeenCalledWith(11);
+      expect(p1.terminal.dispose).toHaveBeenCalled();
+      expect(tab1.panes).toHaveLength(0);
+      expect(component.tabs.map((t) => t.id)).toEqual([2]);
+    });
+
+    it('closes when the user confirms the running-process warning', async () => {
+      window.terminalPty = makeBridge({ hasProcesses: vi.fn(async () => true) });
+      window.confirm = vi.fn(() => true);
+      const { component, tab1, p1 } = makeComponent();
+
+      await component.closePane(p1.id);
+
+      expect(window.confirm).toHaveBeenCalledWith('A process is still running in this terminal. Close anyway?');
+      expect(window.terminalPty.kill).toHaveBeenCalledWith(11);
+      expect(tab1.panes).toHaveLength(0);
+      expect(component.tabs.map((t) => t.id)).toEqual([2]);
+    });
+
+    it('keeps the pane open when the user cancels the warning', async () => {
+      window.terminalPty = makeBridge({ hasProcesses: vi.fn(async () => true) });
+      window.confirm = vi.fn(() => false);
+      const { component, tab1, p1 } = makeComponent();
+
+      await component.closePane(p1.id);
+
+      expect(window.confirm).toHaveBeenCalled();
+      expect(window.terminalPty.kill).not.toHaveBeenCalled();
+      expect(p1.terminal.dispose).not.toHaveBeenCalled();
+      expect(tab1.panes).toEqual([p1]);
+      expect(component.tabs.map((t) => t.id)).toEqual([1, 2]);
+    });
+
+    it('never prompts for panes without a live PTY', async () => {
+      window.terminalPty = makeBridge();
+      window.confirm = vi.fn();
+      const { component, p1 } = makeComponent();
+      p1.ptyCreated = false;
+
+      await component.closePane(p1.id);
+
+      expect(window.terminalPty.hasProcesses).not.toHaveBeenCalled();
+      expect(window.confirm).not.toHaveBeenCalled();
+    });
+
+    it('never prompts when the PTY bridge cannot check processes', async () => {
+      window.terminalPty = makeBridge({ hasProcesses: undefined });
+      window.confirm = vi.fn();
+      const { component, p1 } = makeComponent();
+
+      await component.closePane(p1.id);
+
+      expect(window.confirm).not.toHaveBeenCalled();
+      expect(window.terminalPty.kill).toHaveBeenCalledWith(11);
+    });
   });
 });

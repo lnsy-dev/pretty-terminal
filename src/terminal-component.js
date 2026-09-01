@@ -71,6 +71,24 @@ function buildTerminalTheme(element) {
 }
 
 /**
+ * Match the "open a new tab" shortcut: Cmd+T or Cmd+Return.
+ *
+ * New tabs are deliberately Cmd-only (macOS convention): Ctrl+T is left for
+ * the shell, where it is commonly bound (e.g. fzf, command palettes). Shared
+ * by the document-level handler and the xterm.js custom key handler so both
+ * paths agree on exactly which events open a tab.
+ *
+ * @param {KeyboardEvent} e - Keyboard event.
+ * @returns {boolean} Whether the event matches the new-tab shortcut.
+ */
+function isNewTabShortcut(e) {
+  return (
+    e.metaKey && !e.altKey && !e.shiftKey &&
+    (e.key === 't' || e.key === 'T' || e.key === 'Enter')
+  );
+}
+
+/**
  * Return a debounced wrapper that waits until `ms` have elapsed without the
  * wrapped function being called before invoking it.
  *
@@ -321,7 +339,7 @@ class TerminalComponent extends DataroomElement {
     const spawn = (attemptsLeft) => {
       const size = fitPane(pane);
       if (size) {
-        pty.createTerminal(pane.id, undefined, size.cols, size.rows);
+        pty.createTerminal(pane.id, undefined, size.cols, size.rows, pane.cwd);
         pane.ptyCreated = true;
         return;
       }
@@ -335,9 +353,10 @@ class TerminalComponent extends DataroomElement {
   /**
    * Handle global keyboard shortcuts for tabs and panes.
    *
-   * Cmd/Ctrl+T opens a new tab. Cmd/Ctrl+Shift+T splits the active tab.
-   * Cmd/Ctrl+W closes the active pane. Cmd/Ctrl+1-9 switch to the tab whose
-   * id is 1-9, and Cmd/Ctrl+0 switches to the tab whose id is 10.
+   * Cmd+T or Cmd+Return opens a new tab. Cmd/Ctrl+Shift+T splits the
+   * active tab. Cmd/Ctrl+W closes the active pane. Cmd/Ctrl+1-9 switch to the
+   * tab whose id is 1-9, and Cmd/Ctrl+0 switches to the tab whose id is 10; a
+   * number with no matching tab opens a new tab under that number.
    * Ctrl+Left/Right cycles tabs.
    *
    * @private
@@ -355,26 +374,38 @@ class TerminalComponent extends DataroomElement {
   /**
    * Perform the tab/pane shortcut action, if any, for the given key event.
    *
-   * Cmd/Ctrl+1 through Cmd/Ctrl+9 switch to the tab whose id is 1-9, and
-   * Cmd/Ctrl+0 switches to the tab whose id is 10. Tabs keep their number
+   * Cmd+T and Cmd+Return open a new tab. Cmd/Ctrl+1 through Cmd/Ctrl+9
+   * switch to the tab whose id is 1-9, and Cmd/Ctrl+0 switches to the tab
+   * whose id is 10. Tabs keep their number
    * when other tabs are closed, so Cmd/Ctrl+4 always activates tab 4 even
-   * if it is the only remaining tab.
+   * if it is the only remaining tab. When the numbered tab does not exist,
+   * a new tab is opened under that number.
    *
    * @private
    * @param {KeyboardEvent} e - Keyboard event.
    * @returns {void}
    */
   processTabShortcut(e) {
-    const isNewTab = (e.key === 't' || e.key === 'T') && (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey;
+    const isNewTab = isNewTabShortcut(e);
     const isSplitPane = (e.key === 't' || e.key === 'T') && (e.metaKey || e.ctrlKey) && !e.altKey && e.shiftKey;
     const isClosePane = (e.key === 'w' || e.key === 'W') && (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey;
     const isCycleRight = e.key === 'ArrowRight' && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
     const isCycleLeft = e.key === 'ArrowLeft' && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
     const isNumberSwitch = /^[0-9]$/.test(e.key) && (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey;
+    const isMoveSession = /^[0-9]$/.test(e.key) && (e.metaKey || e.ctrlKey) && !e.altKey && e.shiftKey;
 
     if (isNewTab) {
       e.preventDefault();
       this.openTab();
+      return;
+    }
+
+    if (isMoveSession) {
+      // Cmd/Ctrl+Shift+{number}: move the active session to that tab
+      // (creating the tab if needed); an occupied target becomes a split.
+      e.preventDefault();
+      const digit = parseInt(e.key, 10);
+      this.moveActivePaneToTab(digit === 0 ? 10 : digit);
       return;
     }
 
@@ -397,6 +428,10 @@ class TerminalComponent extends DataroomElement {
       const tab = this.tabs.find((t) => t.id === targetId);
       if (tab) {
         this.setActiveTab(tab.id);
+      } else {
+        // The numbered tab does not exist yet: open one under that number
+        // (fire-and-forget; openTab resolves once fonts are loaded).
+        this.openTab(undefined, targetId);
       }
       return;
     }
@@ -426,14 +461,15 @@ class TerminalComponent extends DataroomElement {
       return true;
     }
 
-    const isShortcut = (e.key === 't' || e.key === 'T') && (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey;
+    const isShortcut = isNewTabShortcut(e);
     const isSplitPane = (e.key === 't' || e.key === 'T') && (e.metaKey || e.ctrlKey) && !e.altKey && e.shiftKey;
     const isClosePane = (e.key === 'w' || e.key === 'W') && (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey;
     const isCycleRight = e.key === 'ArrowRight' && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
     const isCycleLeft = e.key === 'ArrowLeft' && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
     const isNumberSwitch = /^[0-9]$/.test(e.key) && (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey;
+    const isMoveSession = /^[0-9]$/.test(e.key) && (e.metaKey || e.ctrlKey) && !e.altKey && e.shiftKey;
 
-    if (isShortcut || isSplitPane || isClosePane || isCycleRight || isCycleLeft || isNumberSwitch) {
+    if (isShortcut || isSplitPane || isClosePane || isCycleRight || isCycleLeft || isNumberSwitch || isMoveSession) {
       this.processTabShortcut(e);
       return false;
     }
@@ -503,46 +539,34 @@ class TerminalComponent extends DataroomElement {
   /**
    * Open a new terminal tab.
    *
-   * The new tab is assigned the lowest available positive integer id and is
-   * inserted into the tab bar so tabs remain ordered 1, 2, 3, ... visually.
+   * By default the new tab is assigned the lowest available positive integer
+   * id; passing `forcedId` instead opens the tab under that exact number
+   * (used by Cmd+{number} to conjure a tab that does not exist yet).
+   * The tab is inserted into the tab bar so tabs remain ordered 1, 2, 3, ...
+   * visually.
+   *
+   * The new tab's shell starts in the working directory of the pane that is
+   * active when the tab is opened, so opening a tab feels like opening a
+   * shell right where the user currently is (instead of always in HOME).
    *
    * @param {string} [name] - Optional tab label. Defaults to the tab number.
+   * @param {number} [forcedId] - Optional tab id to use. Falls back to the
+   *   lowest available id when omitted or already taken.
    * @returns {Promise<number>} The new tab id.
    */
-  async openTab(name) {
-    const tabId = this._nextTabId();
+  async openTab(name, forcedId) {
+    // Capture the source pane before any tab switch: the new tab inherits
+    // the working directory of whatever pane the user is currently in. The
+    // lookup runs while the tab bar/fonts settle below.
+    const sourcePane = this.getActivePane();
+    const cwdPromise = this._getPaneCwd(sourcePane);
 
-    const tabName = name || String(tabId);
+    const forcedIdAvailable = (
+      forcedId !== undefined && !this.tabs.some((t) => t.id === forcedId)
+    );
+    const tabId = forcedIdAvailable ? forcedId : this._nextTabId();
 
-    const container = this.create('div', { class: 'terminal-container', 'data-tab-id': String(tabId) }, this.terminalArea);
-
-    const tabElement = this.create('div', { class: 'tab', 'data-tab-id': String(tabId) });
-
-    const label = this.create('span', { class: 'tab-label', content: tabName }, tabElement);
-
-    tabElement.addEventListener('click', () => this.setActiveTab(tabId));
-    tabElement.addEventListener('contextmenu', (e) => this.showContextMenu(e, tabId));
-
-    const tab = {
-      id: tabId,
-      name: tabName,
-      element: tabElement,
-      labelElement: label,
-      container,
-      panes: [],
-      activePaneId: null,
-    };
-
-    // Keep tabs ordered numerically in both the data model and the tab bar.
-    const nextTab = this.tabs.find((t) => t.id > tabId);
-    if (nextTab) {
-      this.tabBar.insertBefore(tabElement, nextTab.element);
-      const insertIndex = this.tabs.indexOf(nextTab);
-      this.tabs.splice(insertIndex, 0, tab);
-    } else {
-      this.tabBar.insertBefore(tabElement, this.newTabButton);
-      this.tabs.push(tab);
-    }
+    const tab = this._createTab(tabId, name);
 
     // Apply the layout class (single-tab width cap) BEFORE the first fit:
     // the class changes the component's width (120ch cap), and fitting before
@@ -572,9 +596,89 @@ class TerminalComponent extends DataroomElement {
     // a visible container and measures correctly.
     this.setActiveTab(tabId);
 
-    await this.openPane(tab);
+    await this.openPane(tab, { cwd: await cwdPromise });
 
     return tabId;
+  }
+
+  /**
+   * Create a tab shell (data model + tab bar entry + container) without any
+   * panes.
+   *
+   * The tab is inserted so tabs remain ordered 1, 2, 3, ... visually. Used
+   * by openTab for ordinary tab creation and by moveActivePaneToTab when a
+   * session is moved to a tab number that does not exist yet.
+   *
+   * @private
+   * @param {number} tabId - Id for the new tab (assumed free).
+   * @param {string} [name] - Optional tab label. Defaults to the tab number.
+   * @returns {Object} The new tab object.
+   */
+  _createTab(tabId, name) {
+    const tabName = name || String(tabId);
+
+    const container = this.create('div', { class: 'terminal-container', 'data-tab-id': String(tabId) }, this.terminalArea);
+
+    const tabElement = this.create('div', { class: 'tab', 'data-tab-id': String(tabId) });
+
+    const label = this.create('span', { class: 'tab-label', content: tabName }, tabElement);
+
+    // Silent-bell indicator: a tiny red dot on the lower right of the tab
+    // label. Hidden by default; shown via the .has-bell class on the tab.
+    this.create('span', { class: 'tab-bell-dot' }, tabElement);
+
+    tabElement.addEventListener('click', () => this.setActiveTab(tabId));
+    tabElement.addEventListener('contextmenu', (e) => this.showContextMenu(e, tabId));
+
+    const tab = {
+      id: tabId,
+      name: tabName,
+      element: tabElement,
+      labelElement: label,
+      container,
+      panes: [],
+      activePaneId: null,
+      hasBell: false,
+    };
+
+    // Keep tabs ordered numerically in both the data model and the tab bar.
+    const nextTab = this.tabs.find((t) => t.id > tabId);
+    if (nextTab) {
+      this.tabBar.insertBefore(tabElement, nextTab.element);
+      const insertIndex = this.tabs.indexOf(nextTab);
+      this.tabs.splice(insertIndex, 0, tab);
+    } else {
+      this.tabBar.insertBefore(tabElement, this.newTabButton);
+      this.tabs.push(tab);
+    }
+
+    this._updateLayoutClass();
+
+    return tab;
+  }
+
+  /**
+   * Resolve the working directory a new pane's shell should start in.
+   *
+   * Returns the source pane's cwd when the Electron PTY bridge is available
+   * and the pane has a live PTY; otherwise null (the main process then falls
+   * back to the user's home directory). Used by openTab so new tabs inherit
+   * the current pane's directory.
+   *
+   * @private
+   * @param {Object|null} sourcePane - Pane whose cwd to resolve.
+   * @returns {Promise<string|null>} The cwd, or null when unavailable.
+   */
+  async _getPaneCwd(sourcePane) {
+    const pty = typeof window !== 'undefined' ? window.terminalPty : null;
+    if (!sourcePane || !sourcePane.ptyCreated || !pty || typeof pty.getCwd !== 'function') {
+      return null;
+    }
+    try {
+      return await pty.getCwd(sourcePane.id);
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -628,6 +732,10 @@ class TerminalComponent extends DataroomElement {
 
     terminal.attachCustomKeyEventHandler((e) => this.handleTerminalKeyEvent(e));
 
+    // Silent bell: mark the pane's tab (and the app icon) when BEL rings;
+    // the indicator clears when the user opens that tab.
+    terminal.onBell(() => this._handlePaneBell(pane));
+
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
 
@@ -649,6 +757,9 @@ class TerminalComponent extends DataroomElement {
       ptyCreated: false,
       userScrolled: false,
       lastPtySize: null,
+      // Working directory to spawn the shell in (from openTab); null means
+      // the main process picks its default (the home directory).
+      cwd: options.cwd || null,
     };
 
     if (options.insertAfterPaneId !== undefined) {
@@ -659,7 +770,12 @@ class TerminalComponent extends DataroomElement {
     }
 
     paneContainer.addEventListener('mousedown', () => {
-      this.setActivePane(tab, paneId);
+      // Resolve the owner tab at event time: the pane can be moved to a
+      // different tab (Cmd+Shift+{number}) after this listener was created.
+      const ownerTab = this.tabs.find((t) => t.panes.some((p) => p.id === paneId));
+      if (ownerTab) {
+        this.setActivePane(ownerTab, paneId);
+      }
     });
 
     // Size the terminal to the container immediately so the initial shell
@@ -679,7 +795,9 @@ class TerminalComponent extends DataroomElement {
     // fullscreen, font loads) and push the new grid size to the PTY.
     if (typeof ResizeObserver !== 'undefined') {
       pane.resizeObserver = new ResizeObserver(debounce(() => {
-        if (tab.id !== this.activeTabId) {
+        // Compare against the pane's current tab (panes can be moved between
+        // tabs), not the tab captured when the pane was created.
+        if (pane.tabId !== this.activeTabId) {
           return;
         }
         fitPane(pane);
@@ -713,16 +831,89 @@ class TerminalComponent extends DataroomElement {
   }
 
   /**
+   * Move the active pane (its running session) to the tab with the given
+   * number, without closing the session.
+   *
+   * - If the target tab does not exist, it is created under that number and
+   *   the pane becomes its first (full-width) pane.
+   * - If the target tab already exists, the pane is added to it as a split.
+   * - If the source tab is left without panes, it is removed; the window is
+   *   never left empty because the moved pane still exists elsewhere.
+   * - Moving to the tab the pane already belongs to is a no-op.
+   *
+   * @param {number} targetTabId - Tab number to move the session into.
+   * @returns {number|undefined} The target tab id, if a pane was active.
+   */
+  moveActivePaneToTab(targetTabId) {
+    const pane = this.getActivePane();
+    if (!pane) {
+      return undefined;
+    }
+
+    const sourceTab = this.getActiveTab();
+    const existingTarget = this.tabs.find((t) => t.id === targetTabId);
+
+    // Already home: nothing to move.
+    if (existingTarget && existingTarget === sourceTab) {
+      return targetTabId;
+    }
+
+    // Detach the pane from its source tab without touching its PTY or
+    // terminal — the whole point is to keep the session running.
+    const paneIndex = sourceTab.panes.indexOf(pane);
+    sourceTab.panes.splice(paneIndex, 1);
+    if (pane.resizeObserver) {
+      pane.resizeObserver.disconnect();
+      pane.resizeObserver = null;
+    }
+    pane.element.remove();
+
+    // Drop the source tab entirely when it ran out of panes. This mirrors
+    // closeTab's teardown but keeps the (moved) pane alive.
+    if (sourceTab.panes.length === 0) {
+      sourceTab.element.remove();
+      sourceTab.container.remove();
+      this.tabs.splice(this.tabs.indexOf(sourceTab), 1);
+      this._updateLayoutClass();
+    } else {
+      // Hand focus/active marking to a neighbouring pane. The source tab is
+      // about to be deactivated anyway, so no focus() is needed here.
+      const neighbour = sourceTab.panes[Math.max(0, paneIndex - 1)];
+      pane.element.classList.remove('active');
+      if (neighbour) {
+        sourceTab.activePaneId = neighbour.id;
+        neighbour.element.classList.add('active');
+      }
+      this.reflowPanes(sourceTab);
+    }
+
+    const targetTab = existingTarget || this._createTab(targetTabId);
+
+    // Re-home the pane in the target tab: it joins any existing panes as a
+    // split (reflowPanes equalises the flex shares).
+    pane.tabId = targetTab.id;
+    targetTab.container.appendChild(pane.element);
+    targetTab.panes.push(pane);
+    this.reflowPanes(targetTab);
+
+    this.setActiveTab(targetTab.id);
+    this.setActivePane(targetTab, pane.id);
+
+    return targetTab.id;
+  }
+
+  /**
    * Close the active pane.
    *
-   * @returns {void}
+   * @returns {Promise<void>} Resolves once the pane is closed, or earlier
+   *   when the user cancelled the close confirmation.
    */
   closeActivePane() {
     const pane = this.getActivePane();
     if (!pane) {
-      return;
+      return Promise.resolve();
     }
-    this.closePane(pane.id);
+    return this.closePane(pane.id);
   }
 
   /**
@@ -732,26 +923,87 @@ class TerminalComponent extends DataroomElement {
    * window never becomes empty. If it is the last pane of a non-last tab,
    * the whole tab is closed.
    *
+   * Before closing, asks for confirmation when the pane's shell still has
+   * user-launched processes running (checked through the Electron PTY
+   * bridge); cancelling keeps the pane open.
+   *
    * @param {number} paneId - Pane id.
-   * @returns {void}
+   * @returns {Promise<void>} Resolves once the pane is closed, or earlier
+   *   when the user cancelled the close confirmation.
    */
   closePane(paneId) {
     const pane = this.findPaneById(paneId);
     if (!pane) {
-      return;
+      return Promise.resolve();
     }
 
     const tab = this.tabs.find((t) => t.id === pane.tabId);
     if (!tab) {
-      return;
+      return Promise.resolve();
     }
 
     // Never close the only pane of the only tab.
     if (tab.panes.length === 1 && this.tabs.length === 1) {
-      return;
+      return Promise.resolve();
     }
 
-    const paneIndex = tab.panes.findIndex((p) => p.id === paneId);
+    return this._confirmClosePane(pane).then((confirmed) => {
+      if (confirmed) {
+        this._teardownPane(tab, pane);
+      }
+    });
+  }
+
+  /**
+   * Ask the user to confirm closing a pane whose shell still has running
+   * processes.
+   *
+   * Resolves true (close proceeds) when the pane has no live PTY, when the
+   * PTY bridge is unavailable, when the check fails, or when no child
+   * processes are running — only a confirmed-running process prompts.
+   *
+   * @private
+   * @param {Object} pane - Pane about to be closed.
+   * @returns {Promise<boolean>} True when closing may proceed.
+   */
+  async _confirmClosePane(pane) {
+    if (!pane.ptyCreated) {
+      return true;
+    }
+
+    const pty = typeof window !== 'undefined' ? window.terminalPty : null;
+    if (!pty || typeof pty.hasProcesses !== 'function') {
+      return true;
+    }
+
+    let hasProcs = false;
+    try {
+      hasProcs = await pty.hasProcesses(pane.id);
+    } catch {
+      return true;
+    }
+
+    if (!hasProcs) {
+      return true;
+    }
+
+    if (typeof window.confirm === 'function') {
+      return window.confirm('A process is still running in this terminal. Close anyway?');
+    }
+    return true;
+  }
+
+  /**
+   * Tear down a pane: kill its shell, dispose its terminal and remove it
+   * from its tab (closing the tab when it runs out of panes).
+   *
+   * @private
+   * @param {Object} tab - Tab that owns the pane.
+   * @param {Object} pane - Pane to remove.
+   * @returns {void}
+   */
+  _teardownPane(tab, pane) {
+    const paneIndex = tab.panes.indexOf(pane);
 
     if (pane.resizeObserver) {
       pane.resizeObserver.disconnect();
@@ -773,7 +1025,7 @@ class TerminalComponent extends DataroomElement {
       return;
     }
 
-    if (tab.activePaneId === paneId) {
+    if (tab.activePaneId === pane.id) {
       const newIndex = Math.max(0, paneIndex - 1);
       this.setActivePane(tab, tab.panes[newIndex].id);
     }
@@ -825,6 +1077,9 @@ class TerminalComponent extends DataroomElement {
     this.tabs.splice(tabIndex, 1);
 
     this._updateLayoutClass();
+    if (tab.hasBell) {
+      this._updateBellBadge();
+    }
 
     if (this.activeTabId === tabId) {
       this.activeTabId = null;
@@ -832,6 +1087,59 @@ class TerminalComponent extends DataroomElement {
         const newIndex = Math.max(0, tabIndex - 1);
         this.setActiveTab(this.tabs[newIndex].id);
       }
+    }
+  }
+
+  /**
+   * Handle a BEL from one of the panes: mark the owning tab with the bell
+   * indicator and badge the app icon, unless the bell came from the tab the
+   * user is already looking at (the indicator would be pointless there and
+   * would never be "opened" afterwards).
+   *
+   * @private
+   * @param {Object} pane - Pane whose terminal rang the bell.
+   * @returns {void}
+   */
+  _handlePaneBell(pane) {
+    const tab = this.tabs.find((t) => t.id === pane.tabId);
+    if (!tab || tab.id === this.activeTabId) {
+      return;
+    }
+    this._setTabBell(tab, true);
+  }
+
+  /**
+   * Show or hide a tab's silent-bell indicator and refresh the app icon
+   * badge to reflect whether any tab still has an unread bell.
+   *
+   * @private
+   * @param {Object} tab - Tab object.
+   * @param {boolean} hasBell - True to show the indicator, false to clear it.
+   * @returns {void}
+   */
+  _setTabBell(tab, hasBell) {
+    tab.hasBell = hasBell;
+    tab.element.classList.toggle('has-bell', hasBell);
+    this._updateBellBadge();
+  }
+
+  /**
+   * Badge the app (Dock) icon when at least one tab has an unread bell and
+   * clear it when none do. Silently ignored when the PTY bridge is not
+   * available (e.g. the local fallback shell) or does not expose the method.
+   *
+   * @private
+   * @returns {void}
+   */
+  _updateBellBadge() {
+    const pty = typeof window !== 'undefined' ? window.terminalPty : null;
+    if (!pty || typeof pty.setBellBadge !== 'function') {
+      return;
+    }
+    try {
+      pty.setBellBadge(this.tabs.some((t) => t.hasBell));
+    } catch {
+      // The badge is cosmetic; never let it break the terminal.
     }
   }
 
@@ -924,6 +1232,11 @@ class TerminalComponent extends DataroomElement {
     tab.element.classList.add('active');
     tab.container.classList.add('active');
     tab.container.style.display = 'flex';
+
+    // Opening a tab clears its silent-bell indicator.
+    if (tab.hasBell) {
+      this._setTabBell(tab, false);
+    }
 
     // Fit explicitly: the container was hidden (display:none) until now, and
     // waiting for the debounced pane observers would leave a stale grid on

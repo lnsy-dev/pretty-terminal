@@ -23,6 +23,7 @@ vi.mock('@xterm/xterm', () => ({
     open() {}
     onData() {}
     onScroll() {}
+    onBell() {}
     resize(cols, rows) {
       this.cols = cols;
       this.rows = rows;
@@ -114,6 +115,7 @@ describe('TerminalComponent tab shortcuts', () => {
     const setActiveTab = vi.fn();
     component.tabs = [{ id: 4 }];
     component.setActiveTab = setActiveTab;
+    component.openTab = vi.fn();
 
     component.processTabShortcut(makeEvent('4'));
     expect(setActiveTab).toHaveBeenCalledWith(4);
@@ -121,19 +123,60 @@ describe('TerminalComponent tab shortcuts', () => {
     setActiveTab.mockClear();
     component.processTabShortcut(makeEvent('1'));
     expect(setActiveTab).not.toHaveBeenCalled();
+    expect(component.openTab).toHaveBeenCalledWith(undefined, 1);
   });
 
-  it('ignores number switches for tabs that do not exist', () => {
+  it('opens a tab with the pressed number when that tab does not exist', () => {
     const component = Object.create(TerminalComponent.prototype);
     const setActiveTab = vi.fn();
     component.tabs = [{ id: 1 }, { id: 2 }];
     component.setActiveTab = setActiveTab;
+    component.openTab = vi.fn();
 
     component.processTabShortcut(makeEvent('5'));
+    expect(component.openTab).toHaveBeenCalledWith(undefined, 5);
     expect(setActiveTab).not.toHaveBeenCalled();
 
+    component.openTab.mockClear();
     component.processTabShortcut(makeEvent('0'));
-    expect(setActiveTab).not.toHaveBeenCalled();
+    expect(component.openTab).toHaveBeenCalledWith(undefined, 10);
+  });
+
+  it('still switches when the numbered tab exists', () => {
+    const component = Object.create(TerminalComponent.prototype);
+    const setActiveTab = vi.fn();
+    component.tabs = [{ id: 1 }, { id: 2 }];
+    component.setActiveTab = setActiveTab;
+    component.openTab = vi.fn();
+
+    component.processTabShortcut(makeEvent('2'));
+    expect(setActiveTab).toHaveBeenCalledWith(2);
+    expect(component.openTab).not.toHaveBeenCalled();
+  });
+
+  it('moves the active session with Cmd+Shift+{number}', () => {
+    const component = Object.create(TerminalComponent.prototype);
+    const moveActivePaneToTab = vi.fn();
+    component.moveActivePaneToTab = moveActivePaneToTab;
+
+    component.processTabShortcut(makeEvent('3', true, true));
+    expect(moveActivePaneToTab).toHaveBeenCalledWith(3);
+
+    component.processTabShortcut(makeEvent('0', true, true));
+    expect(moveActivePaneToTab).toHaveBeenCalledWith(10);
+  });
+
+  it('does not move sessions for plain Cmd+{number}', () => {
+    const component = Object.create(TerminalComponent.prototype);
+    const setActiveTab = vi.fn();
+    const moveActivePaneToTab = vi.fn();
+    component.tabs = [{ id: 3 }];
+    component.setActiveTab = setActiveTab;
+    component.moveActivePaneToTab = moveActivePaneToTab;
+
+    component.processTabShortcut(makeEvent('3'));
+    expect(setActiveTab).toHaveBeenCalledWith(3);
+    expect(moveActivePaneToTab).not.toHaveBeenCalled();
   });
 
   it('chooses the lowest unused positive integer for a new tab id', () => {
@@ -164,7 +207,7 @@ describe('TerminalComponent tab shortcuts', () => {
     expect(event.preventDefault).not.toHaveBeenCalled();
   });
 
-  it('opens a new tab with Cmd/Ctrl+T', () => {
+  it('opens a new tab with Cmd+T', () => {
     const component = Object.create(TerminalComponent.prototype);
     const openTab = vi.fn();
     component.openTab = openTab;
@@ -173,6 +216,74 @@ describe('TerminalComponent tab shortcuts', () => {
     component.processTabShortcut(event);
     expect(openTab).toHaveBeenCalled();
     expect(event.preventDefault).toHaveBeenCalled();
+  });
+
+  it('does not open a new tab with Ctrl+T or Ctrl+Return (Cmd only)', () => {
+    const component = Object.create(TerminalComponent.prototype);
+    const openTab = vi.fn();
+    component.openTab = openTab;
+
+    // New tabs are Cmd-only: Ctrl+T and Ctrl+Return must reach the shell
+    // untouched, where terminal programs commonly bind them.
+    for (const key of ['t', 'T', 'Enter']) {
+      const event = {
+        key,
+        metaKey: false,
+        ctrlKey: true,
+        altKey: false,
+        shiftKey: false,
+        preventDefault: vi.fn(),
+        defaultPrevented: false,
+        type: 'keydown',
+      };
+      component.processTabShortcut(event);
+      expect(openTab).not.toHaveBeenCalled();
+      expect(event.preventDefault).not.toHaveBeenCalled();
+    }
+  });
+
+  it('opens a new tab with Cmd+Return', () => {
+    const component = Object.create(TerminalComponent.prototype);
+    const openTab = vi.fn();
+    component.openTab = openTab;
+
+    const event = makeEvent('Enter');
+    component.processTabShortcut(event);
+    expect(openTab).toHaveBeenCalled();
+    expect(event.preventDefault).toHaveBeenCalled();
+  });
+
+  it('does not open a new tab with Return alone or Ctrl+Return', () => {
+    const component = Object.create(TerminalComponent.prototype);
+    const openTab = vi.fn();
+    component.openTab = openTab;
+
+    // Plain Return must reach the shell (it sends \\r), and Ctrl+Return is
+    // not bound to anything.
+    for (const modifiers of [{ metaKey: false, ctrlKey: false }, { metaKey: false, ctrlKey: true }]) {
+      const event = {
+        key: 'Enter',
+        metaKey: modifiers.metaKey,
+        ctrlKey: modifiers.ctrlKey,
+        altKey: false,
+        shiftKey: false,
+        preventDefault: vi.fn(),
+        defaultPrevented: false,
+        type: 'keydown',
+      };
+      component.processTabShortcut(event);
+      expect(openTab).not.toHaveBeenCalled();
+      expect(event.preventDefault).not.toHaveBeenCalled();
+    }
+  });
+
+  it('swallows Cmd+Return inside an xterm.js pane so the shell never sees it', () => {
+    const component = Object.create(TerminalComponent.prototype);
+    component.processTabShortcut = vi.fn();
+
+    const event = makeEvent('Enter');
+    expect(component.handleTerminalKeyEvent(event)).toBe(false);
+    expect(component.processTabShortcut).toHaveBeenCalledWith(event);
   });
 
   it('splits the active tab with Cmd/Ctrl+Shift+T', () => {

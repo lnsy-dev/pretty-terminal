@@ -25,9 +25,10 @@
  * nodeIntegration.
  */
 
-import { app, BrowserWindow, protocol, ipcMain } from 'electron';
+import { app, BrowserWindow, protocol, ipcMain, dialog } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
@@ -35,6 +36,8 @@ import { spawn } from 'node-pty';
 import { WINDOW_OPTIONS } from './window-options.js';
 import { isProfilerEnabled, collectMetrics } from './profiler.js';
 import { resolveStartUrl } from './dev-server.js';
+import { resolvePtyCwd } from './pty-cwd.js';
+import { hasRunningProcesses } from './pty-processes.js';
 
 // Load project-specific environment variables (PORT, ELECTRON_DEV_URL, etc.)
 // so the dev server URL matches the one generated when the project was created.
@@ -48,6 +51,81 @@ const DEV_SERVER_URL = process.env.ELECTRON_DEV_URL || 'http://localhost:3000';
 
 /** Active pseudo-terminals, keyed by `${rendererWebContentsId}:${tabId}`. */
 const ptyProcesses = new Map();
+
+/**
+ * Quit-guard state.
+ *
+ * `forceQuit` is set once the user has confirmed quitting (or nothing is
+ * running), so the real quit pass is not intercepted again. While a
+ * confirmation dialog is open further quit/close requests are swallowed so
+ * dialogs never stack.
+ */
+let forceQuit = false;
+let quitConfirmationOpen = false;
+
+/**
+ * Check whether any live PTY has user-launched child processes running.
+ *
+ * @returns {Promise<boolean>}
+ */
+async function anyPtyHasRunningProcesses() {
+  for (const ptyProcess of ptyProcesses.values()) {
+    if (await hasRunningProcesses(ptyProcess.pid)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Ask the user to confirm closing/quitting while processes are running.
+ *
+ * When nothing is running (or the user confirms) the pending quit/close is
+ * carried out by setting forceQuit and re-triggering the original action.
+ *
+ * @param {BrowserWindow} win - The window being closed (may be undefined).
+ * @param {{ quit: boolean }} options - Whether the intent was quitting the
+ *   app (Cmd+Q) or just closing its window.
+ * @returns {Promise<void>}
+ */
+async function confirmQuitIfNeeded(win, { quit }) {
+  if (quitConfirmationOpen) {
+    return;
+  }
+  quitConfirmationOpen = true;
+  try {
+    const verb = quit ? 'Quit' : 'Close';
+    if (!(await anyPtyHasRunningProcesses())) {
+      forceQuit = true;
+      if (quit) {
+        app.quit();
+      } else if (win && !win.isDestroyed()) {
+        win.destroy();
+      }
+      return;
+    }
+
+    const { response } = await dialog.showMessageBox(win, {
+      type: 'warning',
+      buttons: [verb, 'Cancel'],
+      defaultId: 1,
+      cancelId: 1,
+      message: 'Processes are still running',
+      detail: `Terminal processes are still running. ${verb} anyway?`,
+    });
+
+    if (response === 0) {
+      forceQuit = true;
+      if (quit) {
+        app.quit();
+      } else if (win && !win.isDestroyed()) {
+        win.destroy();
+      }
+    }
+  } finally {
+    quitConfirmationOpen = false;
+  }
+}
 
 /**
  * Pick a sensible default shell for the current platform.
@@ -68,7 +146,7 @@ function getDefaultShell() {
  * terminal is backed by a real pseudo-terminal spawned here in the main
  * process, giving the user a full system shell.
  */
-ipcMain.on('terminal-create', (event, { tabId, shell, cols, rows }) => {
+ipcMain.on('terminal-create', (event, { tabId, shell, cols, rows, cwd }) => {
   const webContents = event.sender;
   const senderId = webContents.id;
   const ptyKey = `${senderId}:${tabId}`;
@@ -78,12 +156,31 @@ ipcMain.on('terminal-create', (event, { tabId, shell, cols, rows }) => {
   }
 
   const shellPath = shell || getDefaultShell();
+
+  // Programs like `ls` decide how to print non-ASCII filenames from the
+  // locale. When the app is launched from the macOS Finder/dock the process
+  // environment often has no LANG, so the shell defaults to the C locale and
+  // replaces Unicode characters with '?'. Default to a UTF-8 locale when none
+  // is already configured so Unicode filenames render correctly.
+  const ptyEnv = { ...process.env };
+  if (!ptyEnv.LANG && !ptyEnv.LC_ALL && !ptyEnv.LC_CTYPE) {
+    ptyEnv.LANG = 'en_US.UTF-8';
+  }
+
+  // New tabs pass the cwd of the pane they were opened from so the shell
+  // starts where the user currently is. The path must still exist (a shell
+  // left behind in a deleted directory would make spawn() fail), otherwise
+  // fall back to the home directory.
+  const spawnCwd = cwd && existsSync(cwd)
+    ? cwd
+    : process.env.HOME || process.cwd();
+
   const ptyProcess = spawn(shellPath, [], {
     name: 'xterm-color',
     cols: cols || 80,
     rows: rows || 24,
-    cwd: process.env.HOME || process.cwd(),
-    env: process.env,
+    cwd: spawnCwd,
+    env: ptyEnv,
   });
 
   ptyProcess.onData((data) => {
@@ -100,6 +197,45 @@ ipcMain.on('terminal-create', (event, { tabId, shell, cols, rows }) => {
   });
 
   ptyProcesses.set(ptyKey, ptyProcess);
+});
+
+/**
+ * Report the working directory of a pane's shell process.
+ *
+ * The renderer calls this before opening a new tab so the new shell can
+ * start in the same directory the user is currently in. Resolves to null
+ * when the pane has no live PTY or the cwd cannot be determined.
+ */
+ipcMain.handle('terminal-get-cwd', async (event, { tabId }) => {
+  const ptyProcess = ptyProcesses.get(`${event.sender.id}:${tabId}`);
+  if (!ptyProcess) {
+    return null;
+  }
+  return resolvePtyCwd(ptyProcess.pid);
+});
+
+/**
+ * Report whether a pane's shell has user-launched child processes running
+ * (vim, a build, ...). The shell itself always runs while the pane is open,
+ * so only children count as "something is running". The renderer uses this
+ * to ask for confirmation before closing a pane.
+ */
+ipcMain.handle('terminal-has-processes', async (event, { tabId }) => {
+  const ptyProcess = ptyProcesses.get(`${event.sender.id}:${tabId}`);
+  if (!ptyProcess) {
+    return false;
+  }
+  return hasRunningProcesses(ptyProcess.pid);
+});
+
+/**
+ * Show or clear the silent-bell badge on the app (Dock) icon. The renderer
+ * calls this whenever a tab gains or loses an unread bell indicator.
+ */
+ipcMain.on('terminal-bell-badge', (event, active) => {
+  if (process.platform === 'darwin' && app.dock) {
+    app.dock.setBadge(active ? '●' : '');
+  }
 });
 
 ipcMain.on('terminal-input', (event, { tabId, data }) => {
@@ -242,6 +378,17 @@ async function createWindow() {
     }
   });
 
+  // Confirm before the window closes while shells still have processes
+  // running. forceQuit is set once the user confirmed (or nothing runs), so
+  // the actual close is not intercepted again.
+  win.on('close', (e) => {
+    if (forceQuit) {
+      return;
+    }
+    e.preventDefault();
+    confirmQuitIfNeeded(win, { quit: false });
+  });
+
   // Notify the renderer when the window enters or leaves fullscreen so the
   // UI can adjust (e.g. hide the drag handle and flush tabs left).
   win.on('enter-full-screen', () => {
@@ -280,4 +427,15 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();
   }
+});
+
+// Intercept Cmd+Q / app.quit() so running terminal processes can be
+// confirmed first. The window 'close' handler above covers closing the
+// window itself; this one covers quitting the whole app.
+app.on('before-quit', (e) => {
+  if (forceQuit) {
+    return;
+  }
+  e.preventDefault();
+  confirmQuitIfNeeded(BrowserWindow.getAllWindows()[0], { quit: true });
 });

@@ -83,6 +83,7 @@ terminal-component,
 }
 
 .tab {
+  position: relative;
   display: inline-flex;
   align-items: center;
   max-width: 12rem;
@@ -114,6 +115,25 @@ terminal-component,
 
 .tab-label {
   pointer-events: none;
+}
+
+/* Silent-bell indicator: a tiny red dot on the lower right of the tab
+   label. Shown while the tab has an unread bell (class set by the
+   component), cleared as soon as the tab is opened. */
+.tab-bell-dot {
+  display: none;
+  position: absolute;
+  right: 0.25rem;
+  bottom: 0.15rem;
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 50%;
+  background-color: #e5484d;
+  pointer-events: none;
+}
+
+.tab.has-bell .tab-bell-dot {
+  display: block;
 }
 
 .new-tab-button {
@@ -188,6 +208,17 @@ terminal-component,
 .terminal-pane .xterm {
   height: 100%;
   width: 100%;
+}
+
+/* Hide xterm.js's scrollbar while keeping scrolling functional: the
+   .xterm-viewport still scrolls programmatically (wheel/trackpad events and
+   scroll commands), only the visual bar is removed. */
+.terminal-pane .xterm-viewport {
+  scrollbar-width: none; /* Firefox */
+}
+
+.terminal-pane .xterm-viewport::-webkit-scrollbar {
+  display: none;
 }
 
 /* Per-instance width cap: each xterm grid is limited to 120ch, while the

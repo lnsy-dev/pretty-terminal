@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { TerminalShell, COMMANDS } from '../../src/lib/terminal-shell.js';
+import { TerminalShell, COMMANDS, longestCommonPrefix } from '../../src/lib/terminal-shell.js';
 
 /**
  * Create a fake terminal that captures everything written to it.
@@ -145,6 +145,122 @@ describe('TerminalShell', () => {
     shell.handleData('\x1B[A');
     expect(shell.history.length).toBe(0);
     expect(shell.inputLine).toBe('');
+  });
+});
+
+describe('TerminalShell tab completion', () => {
+  let stub;
+  let shell;
+
+  beforeEach(() => {
+    stub = createStubTerminal();
+    shell = new TerminalShell(stub.terminal);
+    shell.start();
+    flushBuffer(stub.terminal);
+  });
+
+  it('completes a unique command name and adds a trailing space', () => {
+    shell.handleData('cle');
+    flushBuffer(stub.terminal); // drop the echo of the typed characters
+    shell.handleData('\t');
+    expect(shell.inputLine).toBe('clear ');
+    // A full in-place redraw, not an append: no duplicated text.
+    expect(flushBuffer(stub.terminal)).toBe('\r\x1B[K> clear ');
+  });
+
+  it('completes each built-in command from an unambiguous prefix', () => {
+    for (const command of Object.keys(COMMANDS)) {
+      const partial = command.slice(0, Math.max(command.length - 1, 1));
+      // Skip prefixes that also match another command (e.g. "ec" vs "exit").
+      const matches = Object.keys(COMMANDS).filter((c) => c.startsWith(partial));
+      if (matches.length !== 1) {
+        continue;
+      }
+      shell.handleData(`${partial}\t`);
+      expect(shell.inputLine).toBe(`${command} `);
+      flushBuffer(stub.terminal);
+      shell.handleData('\x03'); // Ctrl+C resets the line for the next case
+      flushBuffer(stub.terminal);
+    }
+  });
+
+  it('extends the line to the common prefix when several commands match', () => {
+    shell.handleData('e');
+    flushBuffer(stub.terminal);
+    shell.handleData('\t'); // candidates: echo, exit -> common prefix "e"
+    expect(shell.inputLine).toBe('e');
+    // Nothing to add, so nothing may be written to the terminal.
+    expect(flushBuffer(stub.terminal)).toBe('');
+  });
+
+  it('is idempotent when Tab is pressed repeatedly (no duplicated text)', () => {
+    shell.handleData('cle\t');
+    expect(shell.inputLine).toBe('clear ');
+    flushBuffer(stub.terminal);
+
+    shell.handleData('\t');
+    shell.handleData('\t');
+    expect(shell.inputLine).toBe('clear ');
+    expect(flushBuffer(stub.terminal)).toBe('');
+  });
+
+  it('writes the completed text exactly once across the whole session', () => {
+    shell.handleData('da\t');
+    shell.handleData('\r');
+    const output = stub.terminal.buffer;
+    const occurrences = output.split('date').length - 1;
+    expect(occurrences).toBe(1);
+  });
+
+  it('does nothing on an empty input line', () => {
+    shell.handleData('\t');
+    expect(shell.inputLine).toBe('');
+    expect(flushBuffer(stub.terminal)).toBe('');
+  });
+
+  it('does nothing when no command matches the prefix', () => {
+    shell.handleData('zz');
+    flushBuffer(stub.terminal);
+    shell.handleData('\t');
+    expect(shell.inputLine).toBe('zz');
+    expect(flushBuffer(stub.terminal)).toBe('');
+  });
+
+  it('never inserts a literal tab character into the input line', () => {
+    for (const input of ['', 'e', 'cle', 'zz', 'echo o']) {
+      shell.inputLine = input;
+      shell.handleData('\t');
+      expect(shell.inputLine.includes('\t')).toBe(false);
+    }
+  });
+
+  it('does not complete past the command position (no filesystem access)', () => {
+    shell.handleData('echo on');
+    flushBuffer(stub.terminal);
+    shell.handleData('\t');
+    expect(shell.inputLine).toBe('echo on');
+    expect(flushBuffer(stub.terminal)).toBe('');
+  });
+
+  it('runs the command after completion', () => {
+    shell.handleData('cle\t\r');
+    expect(stub.lines).toContain('[clear]');
+    expect(shell.inputLine).toBe('');
+  });
+});
+
+describe('longestCommonPrefix', () => {
+  it('returns the whole string for a single candidate', () => {
+    expect(longestCommonPrefix(['clear'])).toBe('clear');
+  });
+
+  it('returns the shared prefix of all candidates', () => {
+    expect(longestCommonPrefix(['echo', 'exit'])).toBe('e');
+    expect(longestCommonPrefix(['cl', 'clear', 'clea'])).toBe('cl');
+  });
+
+  it('returns an empty string when candidates share nothing', () => {
+    expect(longestCommonPrefix(['echo', 'help'])).toBe('');
   });
 });
 

@@ -2,8 +2,8 @@
  * Terminal Shell
  *
  * A small line-oriented shell that sits on top of an xterm.js Terminal
- * instance. It handles printable input, backspace, command history, and
- * a handful of built-in commands.
+ * instance. It handles printable input, backspace, Tab completion of
+ * command names, command history, and a handful of built-in commands.
  *
  * The shell is intentionally decoupled from xterm.js so it can be unit
  * tested with a plain "terminal" stub that exposes `write`, `writeln`,
@@ -18,6 +18,7 @@ const ESCAPE_RIGHT = '\x1B[C';
 const ESCAPE_LEFT = '\x1B[D';
 const CARRIAGE_RETURN = '\r';
 const BACKSPACE = '\x7F';
+const TAB = '\t';
 const INTERRUPT = '\x03';
 const ERASE_LINE = '\x1B[K';
 
@@ -190,6 +191,9 @@ class TerminalShell {
       case BACKSPACE:
         this.backspace();
         break;
+      case TAB:
+        this.completeInput();
+        break;
       case INTERRUPT:
         this.cancelInput();
         break;
@@ -331,6 +335,51 @@ class TerminalShell {
   }
 
   /**
+   * Complete the command name being typed when Tab is pressed.
+   *
+   * Only the first token is completed (the shell has no filesystem
+   * access, so there is nothing to offer for later tokens). With one
+   * candidate the command is completed plus a trailing space; with
+   * several, the line grows to their longest common prefix.
+   *
+   * The line is always applied with a full redraw (`\r` + erase line +
+   * prompt + new text) instead of appending the missing characters, and
+   * is left completely untouched when completion has nothing to add.
+   * Both guarantees keep repeated or unmatched Tab presses from ever
+   * duplicating text on screen.
+   *
+   * @private
+   * @returns {void}
+   */
+  completeInput() {
+    // Past the command position there is nothing to complete.
+    if (/\s/.test(this.inputLine)) {
+      return;
+    }
+
+    const candidates = Object.keys(COMMANDS)
+      .filter((command) => command.startsWith(this.inputLine))
+      .sort();
+
+    if (candidates.length === 0) {
+      return;
+    }
+
+    const completed = candidates.length === 1
+      ? `${candidates[0]} `
+      : longestCommonPrefix(candidates);
+
+    // Nothing to add (empty line, repeated Tab, or candidates sharing
+    // only the already-typed prefix): keep the line as-is.
+    if (completed === this.inputLine || completed.length < this.inputLine.length) {
+      return;
+    }
+
+    this.inputLine = completed;
+    this.redrawInputLine();
+  }
+
+  /**
    * Redraw the current prompt and input line in place.
    *
    * @private
@@ -345,6 +394,24 @@ class TerminalShell {
 }
 
 /**
+ * Return the longest prefix shared by every string in the list.
+ *
+ * @param {string[]} strings - Non-empty list of strings.
+ * @returns {string} The shared prefix (possibly '').
+ */
+function longestCommonPrefix(strings) {
+  let prefix = strings[0];
+  for (const str of strings) {
+    let i = 0;
+    while (i < prefix.length && i < str.length && prefix[i] === str[i]) {
+      i += 1;
+    }
+    prefix = prefix.slice(0, i);
+  }
+  return prefix;
+}
+
+/**
  * Determine whether a character should be echoed to the terminal.
  *
  * @param {string} char - A single Unicode character.
@@ -355,5 +422,5 @@ function isPrintable(char) {
   return code >= 0x20 && code !== 0x7f;
 }
 
-export { COMMANDS, TerminalShell };
+export { COMMANDS, TerminalShell, longestCommonPrefix };
 export default TerminalShell;

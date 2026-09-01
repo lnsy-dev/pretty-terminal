@@ -603,8 +603,11 @@ class TerminalComponent extends DataroomElement {
     // CSS default (full width) and then again after the split reflow produced
     // a spurious full-width -> half-width resize: two SIGWINCHs, two redraws
     // in fullscreen apps, and zsh PROMPT_SP "%" markers on wrapped prompts.
+    // The share is applied to both the pane container (which participates in
+    // the tab's flex layout) and the measured wrapper itself.
     const share = computeFlexShares(tab.panes.length + 1);
     paneContainer.style.flex = share;
+    xtermWrapper.style.flex = share;
     tab.panes.forEach((existing) => {
       existing.element.style.flex = share;
     });

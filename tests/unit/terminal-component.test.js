@@ -206,4 +206,21 @@ describe('TerminalComponent tab shortcuts', () => {
     expect(closeActivePane).toHaveBeenCalled();
     expect(event.preventDefault).toHaveBeenCalled();
   });
+
+  it('passes plain Tab presses through to the terminal (no duplication)', () => {
+    const component = Object.create(TerminalComponent.prototype);
+
+    // Tab must reach xterm.js / the PTY untouched so the shell receives
+    // exactly one "\\t" per keypress for completion.
+    const keydown = makeEvent('Tab', false);
+    expect(component.handleTerminalKeyEvent(keydown)).toBe(true);
+
+    const keyup = { ...makeEvent('Tab', false), type: 'keyup' };
+    expect(component.handleTerminalKeyEvent(keyup)).toBe(true);
+
+    // The global shortcut path must neither act on nor cancel plain Tab.
+    const globalEvent = makeEvent('Tab', false);
+    component.processTabShortcut(globalEvent);
+    expect(globalEvent.preventDefault).not.toHaveBeenCalled();
+  });
 });
